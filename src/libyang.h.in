@@ -1114,8 +1114,9 @@ struct ly_ctx *ly_ctx_new_ylmem(const char *search_dir, const char *data, LYD_FO
  *
  * @param[in] ctx Context to be modified.
  * @param[in] search_dir New search path to add to the current paths previously set in ctx.
+ * @return EXIT_SUCCESS, EXIT_FAILURE.
  */
-void ly_ctx_set_searchdir(struct ly_ctx *ctx, const char *search_dir);
+int ly_ctx_set_searchdir(struct ly_ctx *ctx, const char *search_dir);
 
 /**
  * @brief Clean the search path(s) from the libyang context
@@ -1346,9 +1347,9 @@ const struct lys_submodule *ly_ctx_get_submodule2(const struct lys_module *main_
  * This function is primarily meant as a utility function to ease getting specific schema nodes
  * directly from context having data_path a const immutable string.
  *
- * @param[in] ctx Context to work in.
+ * @param[in] ctx Context to work in. Must be set if \p start is NULL.
  * @param[in] start Starting node for a relative schema node identifier, in which
- * case it is mandatory.
+ * case it is mandatory and \p ctx can be NULL.
  * @param[in] data_path JSON schema node identifier.
  * @param[in] output Search operation output instead input.
  * @return Resolved schema node or NULL.
@@ -1747,22 +1748,22 @@ typedef enum {
 
 /**
  * @cond INTERNAL
- * Get address of (thread-specific) `ly_errno' variable.
+ * Get address of (thread-specific) `ly_errno' and `ly_vecode` variable.
  */
-LY_ERR *ly_errno_location(void);
+LY_ERR *ly_errno_address(void);
 
-LY_VECODE *ly_vecode_location(void);
+LY_VECODE *ly_vecode_address(void);
 
 /**
  * @endcond INTERNAL
  * @brief libyang specific (thread-safe) errno (see #LY_ERR for the list of possible values and their meaning).
  */
-#define ly_errno (*ly_errno_location())
+#define ly_errno (*ly_errno_address())
 
 /**
  * @brief libyang's validation error code
  */
-#define ly_vecode (*ly_vecode_location())
+#define ly_vecode (*ly_vecode_address())
 
 /**
  * @brief Get the last (thread-specific) error message. If the coresponding module defined

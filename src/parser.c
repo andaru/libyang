@@ -38,6 +38,8 @@
 
 #define LYP_URANGE_LEN 19
 
+THREAD_LOCAL struct ly_parser ly_parser_data;
+
 static char *lyp_ublock2urange[][2] = {
     {"BasicLatin", "[\\x{0000}-\\x{007F}]"},
     {"Latin-1Supplement", "[\\x{0080}-\\x{00FF}]"},
@@ -217,13 +219,13 @@ lyp_is_rpc_action(struct lys_node *node)
 }
 
 int
-lyp_check_options(int options, const char *func)
+lyp_data_check_options(int options, const char *func)
 {
     int x = options & LYD_OPT_TYPEMASK;
 
     /* LYD_OPT_NOAUTODEL can be used only with LYD_OPT_DATA or LYD_OPT_CONFIG */
     if (options & LYD_OPT_NOAUTODEL) {
-        if (x != LYD_OPT_DATA && x != LYD_OPT_CONFIG) {
+        if ((x == LYD_OPT_EDIT) || (x == LYD_OPT_NOTIF_FILTER)) {
             LOGERR(LY_EINVAL, "%s: Invalid options 0x%x (LYD_OPT_DATA_NOAUTODEL can be used only with LYD_OPT_DATA or LYD_OPT_CONFIG)", func, options);
             return 1;
         }
@@ -914,7 +916,8 @@ validate_length_range(uint8_t kind, uint64_t unum, int64_t snum, int64_t fnum, u
 static int
 validate_pattern(const char *val_str, struct lys_type *type, struct lyd_node *node)
 {
-    int i, rc;
+    int rc;
+    unsigned int i;
     pcre *precomp;
 
     assert(type->base == LY_TYPE_STRING);
@@ -1267,7 +1270,7 @@ make_canonical(struct ly_ctx *ctx, int type, const char **value, void *data1, vo
         c = *((uint8_t *)data2);
         if (num) {
             count = sprintf(buf, "%"PRId64" ", num);
-            if ( (num > 0 && (count - 1) <= c) 
+            if ( (num > 0 && (count - 1) <= c)
                  || (count - 2) <= c ) {
                 /* we have 0. value, print the value with the leading zeros
                  * (one for 0. and also keep the correct with of num according
@@ -1384,7 +1387,8 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
                 int store, int dflt)
 {
     struct lys_type *ret = NULL, *t;
-    int c, i, j, len, found = 0, hidden;
+    int c, len, found = 0, hidden;
+    unsigned int i, j;
     int64_t num;
     uint64_t unum, uind, u;
     const char *ptr, *value = *value_, *itemname;
@@ -1455,7 +1459,6 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
                     }
                 }
             }
-            unum = u;
         }
 
         if (unum & 3) {
@@ -1513,6 +1516,10 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
             /* skip leading whitespaces */
             while (isspace(value[c])) {
                 c++;
+            }
+            if (!value[c]) {
+                /* trailing white spaces */
+                break;
             }
 
             /* get the length of the bit identifier */
@@ -1685,7 +1692,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
             }
         } else if (dflt) {
             /* turn logging off */
-            hidden = *ly_vlog_hide_location();
+            hidden = ly_vlog_hidden;
             ly_vlog_hide(1);
 
             /* the value actually uses module's prefixes instead of the module names as in JSON format,
@@ -1695,7 +1702,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
                 /* invalid identityref format or it was already transformed, so ignore the error here */
                 value = lydict_insert(type->parent->module->ctx, *value_, 0);
                 /* erase error information */
-                ly_err_clean(1);
+                ly_err_clean(ly_parser_data.ctx, 1);
             }
             /* turn logging back on */
             if (!hidden) {
@@ -1744,7 +1751,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
             }
         } else if (dflt) {
             /* turn logging off */
-            hidden = *ly_vlog_hide_location();
+            hidden = ly_vlog_hidden;
             ly_vlog_hide(1);
 
             /* the value actually uses module's prefixes instead of the module names as in JSON format,
@@ -1754,7 +1761,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
                 /* invalid identityref format or it was already transformed, so ignore the error here */
                 value = *value_;
                 /* erase error information */
-                ly_err_clean(1);
+                ly_err_clean(ly_parser_data.ctx, 1);
             } else if (value == *value_) {
                 /* we have actually created the same expression (prefixes are the same as the module names)
                  * so we have just increased dictionary's refcount - fix it */
@@ -1969,7 +1976,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
         found = 0;
 
         /* turn logging off, we are going to try to validate the value with all the types in order */
-        hidden = *ly_vlog_hide_location();
+        hidden = ly_vlog_hidden;
         ly_vlog_hide(1);
 
         while ((t = lyp_get_next_union_type(type, t, &found))) {
@@ -1982,7 +1989,7 @@ lyp_parse_value(struct lys_type *type, const char **value_, struct lyxml_elem *x
             }
             /* erase information about errors - they are false or irrelevant
              * and will be replaced by a single error messages */
-            ly_err_clean(1);
+            ly_err_clean(ly_parser_data.ctx, 1);
 
             if (store) {
                 /* erase possible present and invalid value data */
@@ -2023,7 +2030,7 @@ cleanup:
 struct lys_type *
 lyp_get_next_union_type(struct lys_type *type, struct lys_type *prev_type, int *found)
 {
-    int i;
+    unsigned int i;
     struct lys_type *ret = NULL;
 
     while (!type->info.uni.count) {
@@ -2633,7 +2640,7 @@ lyp_check_status(uint16_t flags1, struct lys_module *mod1, const char *name1,
 
     if ((flg1 < flg2) && (lys_main_module(mod1) == lys_main_module(mod2))) {
         LOGVAL(LYE_INSTATUS, node ? LY_VLOG_LYS : LY_VLOG_NONE, node,
-               flg1 == LYS_STATUS_CURR ? "current" : "deprecated", name1,
+               flg1 == LYS_STATUS_CURR ? "current" : "deprecated", name1, "references",
                flg2 == LYS_STATUS_OBSLT ? "obsolete" : "deprecated", name2);
         return EXIT_FAILURE;
     }
@@ -2887,7 +2894,7 @@ lyp_check_include_missing(struct lys_module *main_module)
 {
     uint8_t i;
 
-    ly_err_clean(1);
+    ly_err_clean(ly_parser_data.ctx, 1);
 
     /* in YANG 1.1, all the submodules must be in the main module, check it even for
      * 1.0 where it will be printed as warning and the include will be added into the main module */

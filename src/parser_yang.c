@@ -28,7 +28,7 @@ static int yang_check_nodes(struct lys_module *module, struct lys_node *parent, 
                             int options, struct unres_schema *unres);
 static int yang_fill_ext_substm_index(struct lys_ext_instance_complex *ext, LY_STMT stmt, enum yytokentype keyword);
 static void yang_free_nodes(struct ly_ctx *ctx, struct lys_node *node);
-void lys_iffeature_free(struct ly_ctx *ctx, struct lys_iffeature *iffeature, uint8_t iffeature_size,
+void lys_iffeature_free(struct ly_ctx *ctx, struct lys_iffeature *iffeature, uint8_t iffeature_size, int shallow,
                         void (*private_destructor)(const struct lys_node *node, void *priv));
 
 static int
@@ -616,7 +616,8 @@ yang_read_require_instance(struct yang_type *stype, int req)
 int
 yang_check_type(struct lys_module *module, struct lys_node *parent, struct yang_type *typ, struct lys_type *type, int tpdftype, struct unres_schema *unres)
 {
-    int i, j, rc, ret = -1;
+    int rc, ret = -1;
+    unsigned int i, j;
     int8_t req;
     const char *name, *value;
     LY_DATA_TYPE base = 0, base_tmp;
@@ -855,8 +856,8 @@ yang_check_type(struct lys_module *module, struct lys_node *parent, struct yang_
             }
         }
 
-        for (i = type->info.bits.count - 1; i > 0; i--) {
-            j = i;
+        for (i = type->info.bits.count; i > 0; i--) {
+            j = i - 1;
 
             /* keep them ordered by position */
             while (j && type->info.bits.bit[j - 1].pos > type->info.bits.bit[j].pos) {
@@ -1022,7 +1023,7 @@ yang_free_type_union(struct ly_ctx *ctx, struct lys_type *type)
 {
     struct lys_type *stype;
     struct yang_type *yang;
-    int i;
+    unsigned int i;
 
     for (i = 0; i < type->info.uni.count; ++i) {
         stype = &type->info.uni.types[i];
@@ -1891,7 +1892,7 @@ yang_check_deviate_must(struct lys_module *module, struct unres_schema *unres,
         goto error;
     }
     /* check XPath dependencies */
-    if (*trg_must_size && unres_schema_add_node(module, unres, dev_target, UNRES_XPATH, NULL)) {
+    if (*trg_must_size && (unres_schema_add_node(module, unres, dev_target, UNRES_XPATH, NULL) == -1)) {
         goto error;
     }
 
@@ -2416,6 +2417,42 @@ yang_read_ext(struct lys_module *module, void *actual, char *ext_name, char *ext
     return instance;
 }
 
+static int
+check_status_flag(struct lys_node *node, struct lys_node *parent)
+{
+    char *str;
+
+    if (parent && (parent->flags & (LYS_STATUS_DEPRC | LYS_STATUS_OBSLT))) {
+        /* status is not inherited by specification, but it not make sense to have
+         * current in deprecated or deprecated in obsolete, so we print warning
+         * and fix the schema by inheriting */
+        if (!(node->flags & (LYS_STATUS_MASK))) {
+            /* status not explicitely specified on the current node -> inherit */
+            str = lys_path(parent);
+            LOGWRN("Missing status in %s subtree (%s), inheriting.",
+                   parent->flags & LYS_STATUS_DEPRC ? "deprecated" : "obsolete", str);
+            free(str);
+            node->flags |= parent->flags & LYS_STATUS_MASK;
+        } else if ((parent->flags & LYS_STATUS_MASK) > (node->flags & LYS_STATUS_MASK)) {
+            /* invalid combination of statuses */
+            switch (node->flags & LYS_STATUS_MASK) {
+                case 0:
+                case LYS_STATUS_CURR:
+                    LOGVAL(LYE_INSTATUS, LY_VLOG_LYS, parent, "current", strnodetype(node->nodetype), "is child of",
+                           parent->flags & LYS_STATUS_DEPRC ? "deprecated" : "obsolete", parent->name);
+                    break;
+                case LYS_STATUS_DEPRC:
+                    LOGVAL(LYE_INSTATUS, LY_VLOG_LYS, parent, "deprecated", strnodetype(node->nodetype), "is child of",
+                           "obsolete", parent->name);
+                    break;
+            }
+            return EXIT_FAILURE;
+        }
+    }
+
+    return EXIT_SUCCESS;
+}
+
 int
 store_config_flag(struct lys_node *node, int options)
 {
@@ -2802,7 +2839,7 @@ void
 yang_type_free(struct ly_ctx *ctx, struct lys_type *type)
 {
     struct yang_type *stype = (struct yang_type *)type->der;
-    int i;
+    unsigned int i;
 
     if (!stype) {
         return ;
@@ -3075,7 +3112,7 @@ yang_free_nodes(struct ly_ctx *ctx, struct lys_node *node)
         /* common part */
         lydict_remove(ctx, tmp->name);
         if (!(tmp->nodetype & (LYS_INPUT | LYS_OUTPUT))) {
-            lys_iffeature_free(ctx, tmp->iffeature, tmp->iffeature_size, NULL);
+            lys_iffeature_free(ctx, tmp->iffeature, tmp->iffeature_size, 0, NULL);
             lydict_remove(ctx, tmp->dsc);
             lydict_remove(ctx, tmp->ref);
         }
@@ -3135,7 +3172,7 @@ yang_free_augment(struct ly_ctx *ctx, struct lys_node_augment *aug)
     lydict_remove(ctx, aug->dsc);
     lydict_remove(ctx, aug->ref);
 
-    lys_iffeature_free(ctx, aug->iffeature, aug->iffeature_size, NULL);
+    lys_iffeature_free(ctx, aug->iffeature, aug->iffeature_size, 0, NULL);
     lys_when_free(ctx, aug->when, NULL);
     yang_free_nodes(ctx, aug->child);
     lys_extension_instances_free(ctx, aug->ext, aug->ext_size, NULL);
@@ -3398,7 +3435,7 @@ int
 yang_fill_type(struct lys_module *module, struct lys_type *type, struct yang_type *stype,
                void *parent, struct unres_schema *unres)
 {
-    int i;
+    unsigned int i;
 
     type->parent = parent;
     if (yang_check_ext_instance(module, &type->ext, type->ext_size, type, unres)) {
@@ -4097,7 +4134,8 @@ yang_check_nodes(struct lys_module *module, struct lys_node *parent, struct lys_
         node->child = NULL;
         node->prev = node;
 
-        if (lys_node_addchild(parent, module->type ? ((struct lys_submodule *)module)->belongsto: module, node)) {
+        if (lys_node_addchild(parent, module->type ? ((struct lys_submodule *)module)->belongsto: module, node) ||
+            check_status_flag(node, parent)) {
             lys_node_unlink(node);
             yang_free_nodes(module->ctx, node);
             goto error;
@@ -4377,7 +4415,14 @@ yang_check_deviation(struct lys_module *module, struct unres_schema *unres, stru
             }
         }
         /* unlink and store the original node */
+        parent = dev_target->parent;
         lys_node_unlink(dev_target);
+        if (parent && parent->nodetype == LYS_AUGMENT) {
+            /* hack for augment, because when the original will be sometime reconnected back, we actually need
+             * to reconnect it to both - the augment and its target (which is deduced from the deviations target
+             * path), so we need to remember the augment as an addition */
+            dev_target->parent = parent;
+        }
         dev->orig_node = dev_target;
     } else {
         /* store a shallow copy of the original node */

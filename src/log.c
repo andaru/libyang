@@ -22,9 +22,10 @@
 #include <string.h>
 
 #include "common.h"
+#include "parser.h"
+#include "context.h"
 #include "tree_internal.h"
 
-extern LY_ERR ly_errno_int;
 volatile int8_t ly_log_level = LY_LLERR;
 static void (*ly_log_clb)(LY_LOG_LEVEL level, const char *msg, const char *path);
 static volatile int path_flag = 1;
@@ -68,21 +69,18 @@ static void
 log_vprintf(LY_LOG_LEVEL level, uint8_t hide, const char *format, const char *path, va_list args)
 {
     char *msg, *bufdup = NULL;
-    struct ly_err *e = ly_err_location();
     struct ly_err_item *eitem;
 
-    if (&ly_errno == &ly_errno_int) {
-        msg = "Internal logger error";
-    } else if (!format) {
+    if (!format) {
         /* postponed print of path related to the previous error, do not rewrite stored original message */
         msg = "Path is related to the previous error message.";
     } else {
         if (level == LY_LLERR) {
             /* store error message into msg buffer ... */
-            msg = e->msg;
+            msg = ly_err_main.msg;
         } else if (!hide) {
             /* other messages are stored in working string buffer and not available for later access */
-            msg = e->buf;
+            msg = ly_err_main.buf;
             if (ly_buf_used && msg[0]) {
                 bufdup = strndup(msg, LY_BUF_SIZE - 1);
             }
@@ -98,30 +96,34 @@ log_vprintf(LY_LOG_LEVEL level, uint8_t hide, const char *format, const char *pa
     if (level == LY_LLERR) {
         if (!path) {
             /* erase previous path */
-            e->path_index = LY_BUF_SIZE - 1;
+            ly_err_main.path_index = LY_BUF_SIZE - 1;
         }
 
         /* if the error-app-tag should be set, do it after calling LOGVAL */
-        e->apptag[0] = '\0';
+        ly_err_main.apptag[0] = '\0';
 
         /* store error information into a list */
-        if (!e->errlist) {
-            eitem = e->errlist = malloc(sizeof *eitem);
-        } else {
-            for (eitem = e->errlist; eitem->next; eitem = eitem->next);
-            eitem->next = malloc(sizeof *eitem->next);
-            eitem = eitem->next;
-        }
-        if (eitem) {
-            eitem->no = ly_errno;
-            eitem->code = ly_vecode;
-            eitem->msg = strdup(msg);
-            if (path) {
-                eitem->path = strdup(path);
+        if (ly_parser_data.ctx) {
+            eitem = pthread_getspecific(ly_parser_data.ctx->errlist_key);
+            if (!eitem) {
+                eitem = malloc(sizeof *eitem);
+                pthread_setspecific(ly_parser_data.ctx->errlist_key, eitem);
             } else {
-                eitem->path = NULL;
+                for (; eitem->next; eitem = eitem->next);
+                eitem->next = malloc(sizeof *eitem->next);
+                eitem = eitem->next;
             }
-            eitem->next = NULL;
+            if (eitem) {
+                eitem->no = ly_errno;
+                eitem->code = ly_vecode;
+                eitem->msg = strdup(msg);
+                if (path) {
+                    eitem->path = strdup(path);
+                } else {
+                    eitem->path = NULL;
+                }
+                eitem->next = NULL;
+            }
         }
     }
 
@@ -153,7 +155,7 @@ ly_log(LY_LOG_LEVEL level, const char *format, ...)
     va_list ap;
 
     va_start(ap, format);
-    log_vprintf(level, (*ly_vlog_hide_location()), format, NULL, ap);
+    log_vprintf(level, ly_err_main.vlog_hide, format, NULL, ap);
     va_end(ap);
 }
 
@@ -197,7 +199,7 @@ ly_log_dbg(LY_LOG_DBG_GROUP group, const char *format, ...)
     }
 
     va_start(ap, format);
-    log_vprintf(LY_LLDBG, (*ly_vlog_hide_location()), dbg_format, NULL, ap);
+    log_vprintf(LY_LLDBG, ly_err_main.vlog_hide, dbg_format, NULL, ap);
     va_end(ap);
 }
 
@@ -223,7 +225,7 @@ lyext_log(LY_LOG_LEVEL level, const char *plugin, const char *function, const ch
     }
 
     va_start(ap, format);
-    log_vprintf(level, (*ly_vlog_hide_location()), plugin_msg, NULL, ap);
+    log_vprintf(level, ly_err_main.vlog_hide, plugin_msg, NULL, ap);
     va_end(ap);
 
     free(plugin_msg);
@@ -268,7 +270,7 @@ const char *ly_errs[] = {
 /* LYE_KEY_DUP */      "Key identifier \"%s\" is not unique.",
 /* LYE_INREGEX */      "Regular expression \"%s\" is not valid (\"%s\": %s).",
 /* LYE_INRESOLV */     "Failed to resolve %s \"%s\".",
-/* LYE_INSTATUS */     "A %s definition \"%s\" references %s definition \"%s\".",
+/* LYE_INSTATUS */     "A %s definition \"%s\" %s %s definition \"%s\".",
 /* LYE_CIRC_LEAFREFS */"A circular chain of leafrefs detected.",
 /* LYE_CIRC_FEATURES */"A circular chain features detected in \"%s\" feature.",
 /* LYE_CIRC_IMPORTS */ "A circular dependency (import) for module \"%s\".",
@@ -300,7 +302,7 @@ const char *ly_errs[] = {
 /* LYE_NOLEAFREF */    "Leafref \"%s\" of value \"%s\" points to a non-existing leaf.",
 /* LYE_NOMANDCHOICE */ "Mandatory choice \"%s\" missing a case branch.",
 
-/* LYE_XPATH_INSNODE */"Schema node \"%.*s\" not found (%.*s).",
+/* LYE_XPATH_INSNODE */"Schema node \"%.*s\" not found (%.*s) with context node \"%s\".",
 /* LYE_XPATH_INTOK */  "Unexpected XPath token %s (%.15s).",
 /* LYE_XPATH_EOF */    "Unexpected XPath expression end.",
 /* LYE_XPATH_INOP_1 */ "Cannot apply XPath operation %s on %s.",
@@ -422,7 +424,7 @@ static const LY_VECODE ecode2vecode[] = {
 void
 ly_vlog_hide(uint8_t hide)
 {
-    (*ly_vlog_hide_location()) = hide;
+    ly_err_main.vlog_hide = hide;
 }
 
 void
@@ -451,11 +453,13 @@ ly_vlog_build_path_reverse(enum LY_VLOG_ELEM elem_type, const void *elem, char *
             }
 
             if (((struct lys_node *)elem)->nodetype & (LYS_AUGMENT | LYS_GROUPING)) {
+                LY_CHECK_ERR_RETURN((*index) < 1, LOGERR(LY_SUCCESS, "%s: path is too long."),);
                 --(*index);
                 path[*index] = ']';
 
                 name = ((struct lys_node *)elem)->name;
                 len = strlen(name);
+                LY_CHECK_ERR_RETURN((*index) < len, LOGERR(LY_SUCCESS, "%s: path is too long."),);
                 (*index) -= len;
                 memcpy(&path[*index], name, len);
 
@@ -470,7 +474,7 @@ ly_vlog_build_path_reverse(enum LY_VLOG_ELEM elem_type, const void *elem, char *
                 name = ((struct lys_node *)elem)->name;
             }
 
-            if (lys_node_module((struct lys_node *)elem) != top_smodule) {
+            if (!((struct lys_node *)elem)->parent || lys_node_module((struct lys_node *)elem) != top_smodule) {
                 prefix = lys_node_module((struct lys_node *)elem)->name;
             } else {
                 prefix = NULL;
@@ -521,19 +525,24 @@ ly_vlog_build_path_reverse(enum LY_VLOG_ELEM elem_type, const void *elem, char *
                                 val_end = "']";
                             }
 
+                            len = strlen(((struct lyd_node_leaf_list *)diter)->value_str);
+                            LY_CHECK_ERR_RETURN((*index) < len + 2, LOGERR(LY_SUCCESS, "%s: path is too long."),);
                             (*index) -= 2;
                             memcpy(&path[(*index)], val_end, 2);
-                            len = strlen(((struct lyd_node_leaf_list *)diter)->value_str);
                             (*index) -= len;
                             memcpy(&path[(*index)], ((struct lyd_node_leaf_list *)diter)->value_str, len);
+
+                            len = strlen(diter->schema->name);
+                            LY_CHECK_ERR_RETURN((*index) < len + 3, LOGERR(LY_SUCCESS, "%s: path is too long."),);
                             (*index) -= 2;
                             memcpy(&path[(*index)], val_start, 2);
-                            len = strlen(diter->schema->name);
                             (*index) -= len;
                             memcpy(&path[(*index)], diter->schema->name, len);
+
                             if (lyd_node_module(dlist) != lyd_node_module(diter)) {
-                                path[--(*index)] = ':';
                                 len = strlen(lyd_node_module(diter)->name);
+                                LY_CHECK_ERR_RETURN((*index) < len + 2, LOGERR(LY_SUCCESS, "%s: path is too long."),);
+                                path[--(*index)] = ':';
                                 (*index) -= len;
                                 memcpy(&path[(*index)], lyd_node_module(diter)->name, len);
                             }
@@ -542,8 +551,6 @@ ly_vlog_build_path_reverse(enum LY_VLOG_ELEM elem_type, const void *elem, char *
                     }
                 } else {
                     /* schema list without keys - use instance position */
-                    path[--(*index)] = ']';
-
                     i = j = lyd_list_pos(dlist);
                     len = 1;
                     while (j > 9) {
@@ -555,6 +562,8 @@ ly_vlog_build_path_reverse(enum LY_VLOG_ELEM elem_type, const void *elem, char *
                     LY_CHECK_ERR_RETURN(!str, LOGMEM, );
                     sprintf(str, "%d", i);
 
+                    LY_CHECK_ERR_RETURN((*index) < len + 2, free(str); LOGERR(LY_SUCCESS, "%s: path is too long."),);
+                    path[--(*index)] = ']';
                     (*index) -= len;
                     strncpy(&path[(*index)], str, len);
 
@@ -573,9 +582,10 @@ ly_vlog_build_path_reverse(enum LY_VLOG_ELEM elem_type, const void *elem, char *
                     val_end = "']";
                 }
 
+                len = strlen(((struct lyd_node_leaf_list *)elem)->value_str);
+                LY_CHECK_ERR_RETURN((*index) < len + 6, LOGERR(LY_SUCCESS, "%s: path is too long."),);
                 (*index) -= 2;
                 memcpy(&path[(*index)], val_end, 2);
-                len = strlen(((struct lyd_node_leaf_list *)elem)->value_str);
                 (*index) -= len;
                 memcpy(&path[(*index)], ((struct lyd_node_leaf_list *)elem)->value_str, len);
                 (*index) -= 4;
@@ -586,10 +596,11 @@ ly_vlog_build_path_reverse(enum LY_VLOG_ELEM elem_type, const void *elem, char *
             break;
         case LY_VLOG_STR:
             len = strlen((const char *)elem) + 1;
-            if (len > LY_BUF_SIZE) {
-                len = LY_BUF_SIZE - 1;
+            if ((*index) < len) {
+                LOGERR(LY_SUCCESS, "%s: path is too long.")
+                len = (*index);
             }
-            (*index) = LY_BUF_SIZE - len;
+            (*index) = (*index) - len;
             memcpy(&path[(*index)], (const char *)elem, len - 1);
             return;
         default:
@@ -599,19 +610,23 @@ ly_vlog_build_path_reverse(enum LY_VLOG_ELEM elem_type, const void *elem, char *
         }
         if (name) {
             len = strlen(name);
+            LY_CHECK_ERR_RETURN((*index) < len, LOGERR(LY_SUCCESS, "%s: path is too long."),);
             (*index) -= len;
             memcpy(&path[*index], name, len);
             if (prefix) {
-                path[--(*index)] = ':';
                 len = strlen(prefix);
-                (*index) = (*index) - len;
+                LY_CHECK_ERR_RETURN((*index) < len + 1, LOGERR(LY_SUCCESS, "%s: path is too long."),);
+                path[--(*index)] = ':';
+                (*index) -= len;
                 memcpy(&path[(*index)], prefix, len);
             }
         }
+        LY_CHECK_ERR_RETURN((*index) < 1, LOGERR(LY_SUCCESS, "%s: path is too long."),);
         path[--(*index)] = '/';
         if (elem_type == LY_VLOG_LYS && !elem && sparent && sparent->nodetype == LYS_AUGMENT) {
             len = strlen(((struct lys_node_augment *)sparent)->target_name);
-            (*index) = (*index) - len;
+            LY_CHECK_ERR_RETURN((*index) < len, LOGERR(LY_SUCCESS, "%s: path is too long."),);
+            (*index) -= len;
             memcpy(&path[(*index)], ((struct lys_node_augment *)sparent)->target_name, len);
         }
     }
@@ -661,13 +676,13 @@ log:
     switch (code) {
     case LYE_SPEC:
         fmt = va_arg(ap, char *);
-        log_vprintf(LY_LLERR, (*ly_vlog_hide_location()), fmt, index && path[(*index)] ? &path[(*index)] : NULL, ap);
+        log_vprintf(LY_LLERR, ly_err_main.vlog_hide, fmt, index && path[(*index)] ? &path[(*index)] : NULL, ap);
         break;
     case LYE_PATH:
-        log_vprintf(LY_LLERR, (*ly_vlog_hide_location()), NULL, &path[(*index)], ap);
+        log_vprintf(LY_LLERR, ly_err_main.vlog_hide, NULL, &path[(*index)], ap);
         break;
     default:
-        log_vprintf(LY_LLERR, (*ly_vlog_hide_location()), ly_errs[code],
+        log_vprintf(LY_LLERR, ly_err_main.vlog_hide, ly_errs[code],
                     index && path[(*index)] ? &path[(*index)] : NULL, ap);
         break;
     }
@@ -675,12 +690,12 @@ log:
 }
 
 void
-ly_err_repeat(void)
+ly_err_repeat(struct ly_ctx *ctx)
 {
     struct ly_err_item *i;
 
-    if ((ly_log_level >= LY_LLERR) && !*ly_vlog_hide_location()) {
-        for (i = ly_err_location()->errlist; i; i = i->next) {
+    if ((ly_log_level >= LY_LLERR) && !ly_err_main.vlog_hide) {
+        for (i = pthread_getspecific(ctx->errlist_key); i; i = i->next) {
             if (ly_log_clb) {
                 ly_log_clb(LY_LLERR, i->msg, i->path);
             } else {
