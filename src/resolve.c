@@ -1738,7 +1738,7 @@ resolve_schema_nodeid(const char *nodeid, const struct lys_node *start, const st
     struct lys_node_augment *last_aug;
     int r, nam_len, mod_name_len = 0, is_relative = -1, all_desc, has_predicate, nodeid_end = 0;
     /* resolved import module from the start module, it must match the next node-name-match sibling */
-    const struct lys_module *start_mod, *aux_mod;
+    const struct lys_module *start_mod, *aux_mod = NULL;
     char *str;
 
     assert(nodeid && (start || cur_module) && ret);
@@ -2201,7 +2201,7 @@ resolve_json_nodeid(const char *nodeid, struct ly_ctx *ctx, const struct lys_nod
 
         memmove(module_name, mod_name, mod_name_len);
         module_name[mod_name_len] = '\0';
-        module = ly_ctx_get_module(ctx, module_name, NULL);
+        module = ly_ctx_get_module(ctx, module_name, NULL, 1);
 
         if (buf_backup) {
             /* return previous internal buffer content */
@@ -2256,7 +2256,7 @@ resolve_json_nodeid(const char *nodeid, struct ly_ctx *ctx, const struct lys_nod
                     memmove(module_name, mod_name, mod_name_len);
                     module_name[mod_name_len] = '\0';
                     /* will also find an augment module */
-                    prefix_mod = ly_ctx_get_module(ctx, module_name, NULL);
+                    prefix_mod = ly_ctx_get_module(ctx, module_name, NULL, 1);
 
                     if (buf_backup) {
                         /* return previous internal buffer content */
@@ -2532,7 +2532,7 @@ resolve_partial_json_data_nodeid(const char *nodeid, const char *llist_value, st
                     memmove(module_name, mod_name, mod_name_len);
                     module_name[mod_name_len] = '\0';
                     /* will also find an augment module */
-                    prefix_mod = ly_ctx_get_module(ctx, module_name, NULL);
+                    prefix_mod = ly_ctx_get_module(ctx, module_name, NULL, 1);
 
                     if (buf_backup) {
                         /* return previous internal buffer content */
@@ -2580,8 +2580,8 @@ resolve_partial_json_data_nodeid(const char *nodeid, const char *llist_value, st
                         }
                     }
 
-                    /* make value canonical */
-                    if ((llist->value_type & LY_TYPE_IDENT)
+                    /* make value canonical (remove module name prefix) unless it was specified with it */
+                    if (llist_value && !strchr(llist_value, ':') && (llist->value_type & LY_TYPE_IDENT)
                             && !strncmp(llist->value_str, lyd_node_module(sibling)->name, strlen(lyd_node_module(sibling)->name))
                             && (llist->value_str[strlen(lyd_node_module(sibling)->name)] == ':')) {
                         data_val = llist->value_str + strlen(lyd_node_module(sibling)->name) + 1;
@@ -6171,6 +6171,7 @@ check_leafref_features(struct lys_type *type)
 {
     struct lys_node *iter;
     struct ly_set *src_parents, *trg_parents, *features;
+    struct lys_node_augment *aug;
     unsigned int i, j, size, x;
     int ret = EXIT_SUCCESS;
 
@@ -6185,12 +6186,28 @@ check_leafref_features(struct lys_type *type)
         if (iter->nodetype & (LYS_INPUT | LYS_OUTPUT)) {
             continue;
         }
+        if (iter->parent && (iter->parent->nodetype == LYS_AUGMENT) && lys_node_module(iter->parent)->implemented) {
+            aug = (struct lys_node_augment *)iter->parent;
+            if ((aug->flags & LYS_NOTAPPLIED) || !aug->target) {
+                /* unresolved augment, wait until it's resolved */
+                ret = EXIT_FAILURE;
+                goto cleanup;
+            }
+        }
         ly_set_add(src_parents, iter, LY_SET_OPT_USEASLIST);
     }
     /* get parents chain of target */
     for (iter = (struct lys_node *)type->info.lref.target; iter; iter = lys_parent(iter)) {
         if (iter->nodetype & (LYS_INPUT | LYS_OUTPUT)) {
             continue;
+        }
+        if (iter->parent && (iter->parent->nodetype == LYS_AUGMENT) && lys_node_module(iter->parent)->implemented) {
+            aug = (struct lys_node_augment *)iter->parent;
+            if ((aug->flags & LYS_NOTAPPLIED) || !aug->target) {
+                /* unresolved augment, wait until it's resolved */
+                ret = EXIT_FAILURE;
+                goto cleanup;
+            }
         }
         ly_set_add(trg_parents, iter, LY_SET_OPT_USEASLIST);
     }
@@ -6296,7 +6313,7 @@ resolve_unres_schema_item(struct lys_module *mod, void *item, enum UNRES_ITEM ty
                           struct unres_schema *unres)
 {
     /* has_str - whether the str_snode is a string in a dictionary that needs to be freed */
-    int rc = -1, has_str = 0, parent_type = 0, i, k;
+    int rc = -1, has_str = 0, parent_type = 0, i, k, hidden;
     unsigned int j;
     struct lys_node *root, *next, *node, *par_grp;
     const char *expr;
@@ -6337,14 +6354,14 @@ resolve_unres_schema_item(struct lys_module *mod, void *item, enum UNRES_ITEM ty
         rc = resolve_schema_leafref(stype->info.lref.path, node, (const struct lys_node **)&stype->info.lref.target);
         if (!rc) {
             assert(stype->info.lref.target);
-            /* check if leafref and its target are under a common if-features */
-            rc = check_leafref_features(stype);
-            if (rc) {
-                break;
-            }
 
             if (lys_node_module(node)->implemented) {
-                /* make all the modules on the path implemented */
+                /* make all the modules on the path implemented, print verbose messages */
+                hidden = ly_vlog_hidden;
+                if (hidden) {
+                    ly_vlog_hide(0);
+                }
+
                 for (next = (struct lys_node *)stype->info.lref.target; next; next = lys_parent(next)) {
                     if (!lys_node_module(next)->implemented) {
                         if (lys_set_implemented(lys_node_module(next))) {
@@ -6361,7 +6378,18 @@ resolve_unres_schema_item(struct lys_module *mod, void *item, enum UNRES_ITEM ty
                 if (lys_leaf_add_leafref_target(stype->info.lref.target, (struct lys_node *)stype->parent)) {
                     rc = -1;
                 }
+
+                if (hidden) {
+                    ly_vlog_hide(1);
+                }
+
+                if (rc) {
+                    break;
+                }
             }
+
+            /* check if leafref and its target are under common if-features */
+            rc = check_leafref_features(stype);
         }
 
         break;
@@ -7297,7 +7325,7 @@ resolve_instid(struct lyd_node *data, const char *path, int req_inst, struct lyd
     const struct lys_module *mod, *prev_mod = NULL;
     struct ly_ctx *ctx = data->schema->module->ctx;
     struct lyd_node *root, *node;
-    const char *model, *name;
+    const char *model = NULL, *name;
     char *str;
     int mod_len, name_len, has_predicate;
     struct unres_data node_match;
@@ -7327,7 +7355,7 @@ resolve_instid(struct lyd_node *data, const char *path, int req_inst, struct lyd
                 LOGMEM;
                 goto error;
             }
-            mod = ly_ctx_get_module(ctx, str, NULL);
+            mod = ly_ctx_get_module(ctx, str, NULL, 1);
             if (ctx->data_clb) {
                 if (!mod) {
                     mod = ctx->data_clb(ctx, str, NULL, 0, ctx->data_clb_data);
@@ -7356,7 +7384,7 @@ resolve_instid(struct lyd_node *data, const char *path, int req_inst, struct lyd
 
         if (has_predicate) {
             /* we have predicate, so the current results must be list or leaf-list */
-            j = 0;
+            parsed = j = 0;
             /* index of the current node (for lists with position predicates) */
             cur_idx = 1;
             while (j < (signed)node_match.count) {
