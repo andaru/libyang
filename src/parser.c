@@ -466,7 +466,7 @@ lyp_search_file(struct ly_ctx *ctx, struct lys_module *module, const char *name,
                 int implement, struct unres_schema *unres)
 {
     size_t len, flen, match_len = 0, dir_len;
-    int fd, i;
+    int fd, i, implicit_cwd = 0;
     char *wd, *wn = NULL;
     DIR *dir = NULL;
     struct dirent *file;
@@ -490,11 +490,21 @@ lyp_search_file(struct ly_ctx *ctx, struct lys_module *module, const char *name,
     if (!wd) {
         LOGMEM;
         goto cleanup;
-    } else if (ly_set_add(dirs, wd, 0) == -1) {
-        goto cleanup;
+    } else {
+        /* add implicit current working directory (./) to be searched,
+         * this directory is not searched recursively */
+        if (ly_set_add(dirs, wd, 0) == -1) {
+            goto cleanup;
+        }
+        implicit_cwd = 1;
     }
     if (ctx->models.search_paths) {
         for (i = 0; ctx->models.search_paths[i]; i++) {
+            /* check for duplicities with the implicit current working directory */
+            if (implicit_cwd && !strcmp(dirs->set.g[0], ctx->models.search_paths[i])) {
+                implicit_cwd = 0;
+                continue;
+            }
             wd = strdup(ctx->models.search_paths[i]);
             if (!wd) {
                 LOGMEM;
@@ -539,7 +549,7 @@ lyp_search_file(struct ly_ctx *ctx, struct lys_module *module, const char *name,
                            file->d_name, wd, strerror(errno));
                     continue;
                 }
-                if (S_ISDIR(st.st_mode) && dirs->number) {
+                if (S_ISDIR(st.st_mode) && (dirs->number || !implicit_cwd)) {
                     /* we have another subdirectory in searchpath to explore,
                      * subdirectories are not taken into account in current working dir (dirs->set.g[0]) */
                     if (ly_set_add(dirs, wn, 0) == -1) {
@@ -1147,9 +1157,9 @@ error:
 int
 lyp_check_pattern(const char *pattern, pcre **pcre_precomp)
 {
-    int idx, start, end, err_offset;
+    int idx, start, end, err_offset, dol_count;
     char *perl_regex, *ptr;
-    const char *err_msg;
+    const char *err_msg, *orig_ptr;
     pcre *precomp;
 
     /*
@@ -1157,11 +1167,36 @@ lyp_check_pattern(const char *pattern, pcre **pcre_precomp)
      *
      * http://www.w3.org/TR/2004/REC-xmlschema-2-20041028/#regexs
      */
-    perl_regex = malloc((strlen(pattern) + 2) * sizeof(char));
+
+    /* we need to replace all "$" with "\$", count them now */
+    for (dol_count = 0, ptr = strchr(pattern, '$'); ptr; ++dol_count, ptr = strchr(ptr + 1, '$'));
+
+    perl_regex = malloc((strlen(pattern) + 4 + dol_count) * sizeof(char));
     LY_CHECK_ERR_RETURN(!perl_regex, LOGMEM, EXIT_FAILURE);
-    strcpy(perl_regex, pattern);
+    perl_regex[0] = '\0';
+
+    ptr = perl_regex;
+
     if (strncmp(pattern + strlen(pattern) - 2, ".*", 2)) {
-        strcat(perl_regex, "$");
+        /* we wil add line-end anchoring */
+        ptr[0] = '(';
+        ++ptr;
+    }
+
+    for (orig_ptr = pattern; orig_ptr[0]; ++orig_ptr) {
+        if (orig_ptr[0] == '$') {
+            ptr += sprintf(ptr, "\\$");
+        } else {
+            ptr[0] = orig_ptr[0];
+            ++ptr;
+        }
+    }
+
+    if (strncmp(pattern + strlen(pattern) - 2, ".*", 2)) {
+        ptr += sprintf(ptr, ")$");
+    } else {
+        ptr[0] = '\0';
+        ++ptr;
     }
 
     /* substitute Unicode Character Blocks with exact Character Ranges */
@@ -3818,4 +3853,88 @@ copyutf8(char *dst, const char *src)
         LOGVAL(LYE_SPEC, LY_VLOG_NONE, NULL, "Invalid UTF-8 leading byte 0x%02x", src[0]);
         return 0;
     }
+}
+
+const struct lys_module *
+lyp_get_module(const struct lys_module *module, const char *prefix, int pref_len, const char *name, int name_len, int in_data)
+{
+    const struct lys_module *main_module;
+    char *str;
+    int i;
+
+    assert(!prefix || !name);
+
+    if (prefix && !pref_len) {
+        pref_len = strlen(prefix);
+    }
+    if (name && !name_len) {
+        name_len = strlen(name);
+    }
+
+    main_module = lys_main_module(module);
+
+    /* module own prefix, submodule own prefix, (sub)module own name */
+    if ((!prefix || (!module->type && !strncmp(main_module->prefix, prefix, pref_len) && !main_module->prefix[pref_len])
+                 || (module->type && !strncmp(module->prefix, prefix, pref_len) && !module->prefix[pref_len]))
+            && (!name || (!strncmp(main_module->name, name, name_len) && !main_module->name[name_len]))) {
+        return main_module;
+    }
+
+    /* standard import */
+    for (i = 0; i < module->imp_size; ++i) {
+        if ((!prefix || (!strncmp(module->imp[i].prefix, prefix, pref_len) && !module->imp[i].prefix[pref_len]))
+                && (!name || (!strncmp(module->imp[i].module->name, name, name_len) && !module->imp[i].module->name[name_len]))) {
+            return module->imp[i].module;
+        }
+    }
+
+    /* module required by a foreign grouping, deviation, or submodule */
+    if (name) {
+        str = strndup(name, name_len);
+        if (!str) {
+            LOGMEM;
+            return NULL;
+        }
+        main_module = ly_ctx_get_module(module->ctx, str, NULL, 0);
+
+        /* try data callback */
+        if (!main_module && in_data && module->ctx->data_clb) {
+            main_module = module->ctx->data_clb(module->ctx, str, NULL, 0, module->ctx->data_clb_data);
+        }
+
+        free(str);
+        return main_module;
+    }
+
+    return NULL;
+}
+
+const struct lys_module *
+lyp_get_import_module_ns(const struct lys_module *module, const char *ns)
+{
+    int i;
+    const struct lys_module *mod = NULL;
+
+    assert(module && ns);
+
+    if (module->type) {
+        /* the module is actually submodule and to get the namespace, we need the main module */
+        if (ly_strequal(((struct lys_submodule *)module)->belongsto->ns, ns, 0)) {
+            return ((struct lys_submodule *)module)->belongsto;
+        }
+    } else {
+        /* module's own namespace */
+        if (ly_strequal(module->ns, ns, 0)) {
+            return module;
+        }
+    }
+
+    /* imported modules */
+    for (i = 0; i < module->imp_size; ++i) {
+        if (ly_strequal(module->imp[i].module->ns, ns, 0)) {
+            return module->imp[i].module;
+        }
+    }
+
+    return mod;
 }

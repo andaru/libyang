@@ -966,6 +966,7 @@ lyd_new_anydata(struct lyd_node *parent, const struct lys_module *module, const 
     }
 
     if (lys_getnext_data(module, lys_parent(siblings), name, strlen(name), LYS_ANYDATA, &snode) || !snode) {
+        ly_errno = LY_EINVAL;
         return NULL;
     }
 
@@ -990,6 +991,7 @@ lyd_new_output(struct lyd_node *parent, const struct lys_module *module, const c
 
     if (lys_getnext_data(module, lys_parent(siblings), name, strlen(name), LYS_CONTAINER | LYS_LIST | LYS_NOTIF
                          | LYS_RPC | LYS_ACTION, &snode) || !snode) {
+        ly_errno = LY_EINVAL;
         return NULL;
     }
 
@@ -1038,6 +1040,7 @@ lyd_new_output_anydata(struct lyd_node *parent, const struct lys_module *module,
     }
 
     if (lys_getnext_data(module, lys_parent(siblings), name, strlen(name), LYS_ANYDATA, &snode) || !snode) {
+        ly_errno = LY_EINVAL;
         return NULL;
     }
 
@@ -1377,7 +1380,7 @@ lyd_new_path(struct lyd_node *data_tree, struct ly_ctx *ctx, const char *path, v
         case LYS_NOTIF:
         case LYS_RPC:
         case LYS_ACTION:
-            node = _lyd_new(is_relative ? parent : NULL, schild, 0);
+            node = _lyd_new(is_relative ? parent : NULL, schild, (options & LYD_PATH_OPT_DFLT) ? 1 : 0);
             break;
         case LYS_LEAF:
         case LYS_LEAFLIST:
@@ -1409,7 +1412,7 @@ lyd_new_path(struct lyd_node *data_tree, struct ly_ctx *ctx, const char *path, v
                 lyd_free(ret);
                 return NULL;
             }
-            node = _lyd_new_leaf(is_relative ? parent : NULL, schild, (str ? str : value), 0);
+            node = _lyd_new_leaf(is_relative ? parent : NULL, schild, (str ? str : value), (options & LYD_PATH_OPT_DFLT) ? 1 : 0);
             free(str);
             break;
         case LYS_ANYXML:
@@ -2013,6 +2016,7 @@ lyd_merge_parent_children(struct lyd_node *target, struct lyd_node *source, int 
                     }
                     break;
                 } else if (ly_errno) {
+                    lyd_free_withsiblings(source);
                     return EXIT_FAILURE;
                 }
             }
@@ -2129,6 +2133,7 @@ lyd_merge_siblings(struct lyd_node *target, struct lyd_node *source, int options
                 }
                 break;
             } else if (ly_errno) {
+                lyd_free_withsiblings(source);
                 return EXIT_FAILURE;
             }
         }
@@ -2375,6 +2380,8 @@ lyd_merge_to_ctx(struct lyd_node **trg, const struct lyd_node *src, int options,
         /* !! src_merge start is a (top-level) sibling(s) of trg_merge_start */
         ret = lyd_merge_siblings(trg_merge_start, src_merge_start, options);
     }
+    /* it was freed whatever the return value */
+    src_merge_start = NULL;
     if (ret) {
         goto error;
     }
@@ -4302,6 +4309,9 @@ nextsiblings:
         if (to_free) {
             if ((*node) == to_free) {
                 *node = NULL;
+                if (data_tree == to_free) {
+                    data_tree = NULL;
+                }
             }
             lyd_free(to_free);
             to_free = NULL;
@@ -4416,6 +4426,8 @@ repeat:
 
     if (leaf.value_type == LY_TYPE_LEAFREF) {
         if (!sleaf->type.info.lref.target) {
+            /* it should either be unresolved leafref (leaf.value_type are ORed flags) or it will be resolved */
+            LOGINT;
             return EXIT_FAILURE;
         }
         sleaf = sleaf->type.info.lref.target;
@@ -4554,10 +4566,11 @@ lyd_dup_common(struct lyd_node *parent, struct lyd_node *new, const struct lyd_n
     if (ctx) {
         /* we are changing the context, so we have to get the correct schema node in the new context */
         if (parent) {
-            trg_mod = lys_get_import_module(parent->schema->module, NULL, 0, lyd_node_module(orig)->name,
-                                            strlen(lyd_node_module(orig)->name));
+            trg_mod = lyp_get_module(parent->schema->module, NULL, 0, lyd_node_module(orig)->name,
+                                     strlen(lyd_node_module(orig)->name), 1);
             if (!trg_mod) {
-                LOGINT;
+                LOGERR(LY_EINVAL, "Target context does not contain model for the data node being duplicated (%s).",
+                       lyd_node_module(orig)->name);
                 return EXIT_FAILURE;
             }
             /* we know its parent, so we can start with it */
@@ -4670,8 +4683,10 @@ lyd_dup_to_ctx(const struct lyd_node *node, int recursive, struct ly_ctx *ctx)
                 /* in case of duplicating bits (no matter if in the same context or not) or enum and identityref into
                  * a different context, searching for the type and duplicating the data is almost as same as resolving
                  * the string value, so due to a simplicity, parse the value for the duplicated leaf */
-                lyp_parse_value(&((struct lys_node_leaf *)new_leaf->schema)->type, &new_leaf->value_str, NULL,
-                                new_leaf, NULL, 1, node->dflt);
+                if (!lyp_parse_value(&((struct lys_node_leaf *)new_leaf->schema)->type, &new_leaf->value_str, NULL,
+                                     new_leaf, NULL, 1, node->dflt)) {
+                    goto error;
+                }
                 break;
             default:
                 new_leaf->value = ((struct lyd_node_leaf_list *)elem)->value;
@@ -5149,35 +5164,34 @@ end:
 API char *
 lyd_path(const struct lyd_node *node)
 {
-    char *buf_backup = NULL, *buf = ly_buf(), *result = NULL;
-    uint16_t index = LY_BUF_SIZE - 1;
+    char *buf, *result;
+    uint16_t start_idx, len;
 
     if (!node) {
         LOGERR(LY_EINVAL, "%s: NULL node parameter", __func__);
         return NULL;
     }
 
-    /* backup the shared internal buffer */
-    if (ly_buf_used && buf[0]) {
-        buf_backup = strndup(buf, LY_BUF_SIZE - 1);
-    }
-    ly_buf_used++;
+    buf = malloc(LY_BUF_SIZE);
+    LY_CHECK_ERR_RETURN(!buf, LOGMEM, NULL);
+    start_idx = LY_BUF_SIZE - 1;
 
-    /* build the path */
-    buf[index] = '\0';
-    ly_vlog_build_path_reverse(LY_VLOG_LYD, node, buf, &index);
-    result = strdup(&buf[index]);
+    buf[start_idx] = '\0';
+    if (ly_vlog_build_path_reverse(LY_VLOG_LYD, node, &buf, &start_idx, &len, 1)) {
+        free(buf);
+        return NULL;
+    }
+
+    result = malloc(len + 1);
     if (!result) {
         LOGMEM;
-        /* pass through to cleanup */
+        free(buf);
+        return NULL;
     }
 
-    /* restore the shared internal buffer */
-    if (buf_backup) {
-        strncpy(buf, buf_backup, LY_BUF_SIZE - 1);
-        free(buf_backup);
-    }
-    ly_buf_used--;
+    result = memcpy(result, &buf[start_idx], len);
+    result[len] = '\0';
+    free(buf);
 
     return result;
 }
@@ -5333,8 +5347,8 @@ uniquecheck:
                     idx1 = idx2 = LY_BUF_SIZE - 1;
                     path1[idx1] = '\0';
                     path2[idx2] = '\0';
-                    ly_vlog_build_path_reverse(LY_VLOG_LYD, first, path1, &idx1);
-                    ly_vlog_build_path_reverse(LY_VLOG_LYD, second, path2, &idx2);
+                    ly_vlog_build_path_reverse(LY_VLOG_LYD, first, &path1, &idx1, NULL, 0);
+                    ly_vlog_build_path_reverse(LY_VLOG_LYD, second, &path2, &idx2, NULL, 0);
 
                     /* use internal buffer to rebuild the unique string */
                     if (ly_buf_used && uniq_str[0]) {
@@ -5732,7 +5746,7 @@ lyd_wd_default(struct lyd_node_leaf_list *node)
     }
 
     if (node->schema->nodetype == LYS_LEAF) {
-        leaf = (struct lys_node_leaf*)node->schema;
+        leaf = (struct lys_node_leaf *)node->schema;
 
         /* get know if there is a default value */
         if (leaf->dflt) {
@@ -5754,7 +5768,7 @@ lyd_wd_default(struct lyd_node_leaf_list *node)
             return 0;
         }
     } else if (node->schema->module->version >= 2) { /* LYS_LEAFLIST */
-        llist = (struct lys_node_leaflist*)node->schema;
+        llist = (struct lys_node_leaflist *)node->schema;
 
         /* get know if there is a default value */
         if (llist->dflt_size) {

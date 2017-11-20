@@ -1373,7 +1373,7 @@ fill_yin_type(struct lys_module *module, struct lys_node *parent, struct lyxml_e
 #ifdef LY_ENABLED_CACHE
             if (!in_grp) {
                 /* do not compile patterns in groupings */
-                type->info.str.patterns_pcre = malloc(2 * i * sizeof *type->info.str.patterns_pcre);
+                type->info.str.patterns_pcre = calloc(2 * i, sizeof *type->info.str.patterns_pcre);
                 LY_CHECK_ERR_GOTO(!type->info.str.patterns_pcre, LOGMEM, error);
             }
 #endif
@@ -1630,7 +1630,8 @@ fill_yin_typedef(struct lys_module *module, struct lys_node *parent, struct lyxm
 
     /* check default value (if not defined, there still could be some restrictions
      * that need to be checked against a default value from a derived type) */
-    if (unres_schema_add_node(module, unres, &tpdf->type, UNRES_TYPEDEF_DFLT, (struct lys_node *)(&tpdf->dflt)) == -1) {
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED) &&
+            unres_schema_add_node(module, unres, &tpdf->type, UNRES_TYPEDEF_DFLT, (struct lys_node *)(&tpdf->dflt)) == -1) {
         goto error;
     }
 
@@ -2501,8 +2502,10 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
 
                 /* replace */
                 lys_type_free(ctx, t, NULL);
+                memset(t, 0, sizeof (struct lys_type));
                 /* HACK for unres */
                 t->der = (struct lys_tpdf *)child;
+                t->parent = (struct lys_tpdf *)dev_target;
                 if (unres_schema_add_node(module, unres, t, UNRES_TYPE_DER, dev_target) == -1) {
                     goto error;
                 }
@@ -2780,7 +2783,8 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
                 }
 
                 /* check XPath dependencies again */
-                if (*trg_must_size && (unres_schema_add_node(module, unres, dev_target, UNRES_XPATH, NULL) == -1)) {
+                if (*trg_must_size && !(ctx->models.flags & LY_CTX_TRUSTED) &&
+                        (unres_schema_add_node(module, unres, dev_target, UNRES_XPATH, NULL) == -1)) {
                     goto error;
                 }
             } else if (!strcmp(child->name, "unique")) {
@@ -2985,31 +2989,33 @@ fill_yin_deviation(struct lys_module *module, struct lyxml_elem *yin, struct lys
     }
 
     /* now check whether default value, if any, matches the type */
-    for (u = 0; u < dflt_check->number; ++u) {
-        value = NULL;
-        rc = EXIT_SUCCESS;
-        if (dflt_check->set.s[u]->nodetype == LYS_LEAF) {
-            leaf = (struct lys_node_leaf *)dflt_check->set.s[u];
-            value = leaf->dflt;
-            rc = unres_schema_add_node(module, unres, &leaf->type, UNRES_TYPE_DFLT, (struct lys_node *)(&leaf->dflt));
-        } else { /* LYS_LEAFLIST */
-            llist = (struct lys_node_leaflist *)dflt_check->set.s[u];
-            for (j = 0; j < llist->dflt_size; j++) {
-                rc = unres_schema_add_node(module, unres, &llist->type, UNRES_TYPE_DFLT,
-                                           (struct lys_node *)(&llist->dflt[j]));
-                if (rc == -1) {
-                    value = llist->dflt[j];
-                    break;
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED)) {
+        for (u = 0; u < dflt_check->number; ++u) {
+            value = NULL;
+            rc = EXIT_SUCCESS;
+            if (dflt_check->set.s[u]->nodetype == LYS_LEAF) {
+                leaf = (struct lys_node_leaf *)dflt_check->set.s[u];
+                value = leaf->dflt;
+                rc = unres_schema_add_node(module, unres, &leaf->type, UNRES_TYPE_DFLT, (struct lys_node *)(&leaf->dflt));
+            } else { /* LYS_LEAFLIST */
+                llist = (struct lys_node_leaflist *)dflt_check->set.s[u];
+                for (j = 0; j < llist->dflt_size; j++) {
+                    rc = unres_schema_add_node(module, unres, &llist->type, UNRES_TYPE_DFLT,
+                                            (struct lys_node *)(&llist->dflt[j]));
+                    if (rc == -1) {
+                        value = llist->dflt[j];
+                        break;
+                    }
                 }
-            }
 
-        }
-        if (rc == -1) {
-            LOGVAL(LYE_INARG, LY_VLOG_NONE, NULL, value, "default");
-            LOGVAL(LYE_SPEC, LY_VLOG_NONE, NULL,
-                   "The default value \"%s\" of the deviated node \"%s\"no longer matches its type.",
-                   dev->target_name);
-            goto error;
+            }
+            if (rc == -1) {
+                LOGVAL(LYE_INARG, LY_VLOG_NONE, NULL, value, "default");
+                LOGVAL(LYE_SPEC, LY_VLOG_NONE, NULL,
+                    "The default value \"%s\" of the deviated node \"%s\" no longer matches its type.",
+                    dev->target_name);
+                goto error;
+            }
         }
     }
 
@@ -3162,7 +3168,7 @@ fill_yin_augment(struct lys_module *module, struct lys_node *parent, struct lyxm
     }
 
     /* check XPath dependencies */
-    if (aug->when) {
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED) && aug->when) {
         if (options & LYS_PARSE_OPT_INGRP) {
             if (lyxp_node_check_syntax((struct lys_node *)aug)) {
                 goto error;
@@ -3772,7 +3778,7 @@ static int
 read_yin_common(struct lys_module *module, struct lys_node *parent, void *stmt, LYEXT_PAR stmt_type,
                 struct lyxml_elem *xmlnode, int opt, struct unres_schema *unres)
 {
-    struct lys_node *node = stmt;
+    struct lys_node *node = stmt, *p;
     const char *value;
     struct lyxml_elem *sub, *next;
     struct ly_ctx *const ctx = module->ctx;
@@ -3894,7 +3900,14 @@ read_yin_common(struct lys_module *module, struct lys_node *parent, void *stmt, 
          * and fix the schema by inheriting */
         if (!(node->flags & (LYS_STATUS_MASK))) {
             /* status not explicitely specified on the current node -> inherit */
-            str = lys_path(parent);
+            if (stmt_type == LYEXT_PAR_NODE) {
+                p = node->parent;
+                node->parent = parent;
+                str = lys_path(node);
+                node->parent = p;
+            } else {
+                str = lys_path(parent);
+            }
             LOGWRN("Missing status in %s subtree (%s), inheriting.", parent->flags & LYS_STATUS_DEPRC ? "deprecated" : "obsolete", str);
             free(str);
             node->flags |= parent->flags & LYS_STATUS_MASK;
@@ -4119,7 +4132,7 @@ read_yin_case(struct lys_module *module, struct lys_node *parent, struct lyxml_e
     }
 
     /* check XPath dependencies */
-    if (cs->when) {
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED) && cs->when) {
         if (options & LYS_PARSE_OPT_INGRP) {
             if (lyxp_node_check_syntax(retval)) {
                 goto error;
@@ -4328,7 +4341,7 @@ read_yin_choice(struct lys_module *module, struct lys_node *parent, struct lyxml
     }
 
     /* check XPath dependencies */
-    if (choice->when) {
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED) && choice->when) {
         if (options & LYS_PARSE_OPT_INGRP) {
             if (lyxp_node_check_syntax(retval)) {
                 goto error;
@@ -4483,7 +4496,7 @@ read_yin_anydata(struct lys_module *module, struct lys_node *parent, struct lyxm
     }
 
     /* check XPath dependencies */
-    if (anyxml->when || anyxml->must) {
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED) && (anyxml->when || anyxml->must)) {
         if (options & LYS_PARSE_OPT_INGRP) {
             if (lyxp_node_check_syntax(retval)) {
                 goto error;
@@ -4690,14 +4703,14 @@ read_yin_leaf(struct lys_module *module, struct lys_node *parent, struct lyxml_e
 
     /* check default value (if not defined, there still could be some restrictions
      * that need to be checked against a default value from a derived type) */
-    if (!(options & LYS_PARSE_OPT_INGRP) &&
+    if (!(options & LYS_PARSE_OPT_INGRP) && !(module->ctx->models.flags & LY_CTX_TRUSTED) &&
             (unres_schema_add_node(module, unres, &leaf->type, UNRES_TYPE_DFLT,
                                    (struct lys_node *)(&leaf->dflt)) == -1)) {
         goto error;
     }
 
     /* check XPath dependencies */
-    if (leaf->when || leaf->must) {
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED) && (leaf->when || leaf->must)) {
         if (options & LYS_PARSE_OPT_INGRP) {
             if (lyxp_node_check_syntax(retval)) {
                 goto error;
@@ -4995,7 +5008,7 @@ read_yin_leaflist(struct lys_module *module, struct lys_node *parent, struct lyx
     /* check default value (if not defined, there still could be some restrictions
      * that need to be checked against a default value from a derived type) */
     for (r = 0; r < llist->dflt_size; r++) {
-        if (!(options & LYS_PARSE_OPT_INGRP) &&
+        if (!(options & LYS_PARSE_OPT_INGRP) && !(module->ctx->models.flags & LY_CTX_TRUSTED) &&
                 (unres_schema_add_node(module, unres, &llist->type, UNRES_TYPE_DFLT,
                                        (struct lys_node *)(&llist->dflt[r])) == -1)) {
             goto error;
@@ -5003,7 +5016,7 @@ read_yin_leaflist(struct lys_module *module, struct lys_node *parent, struct lyx
     }
 
     /* check XPath dependencies */
-    if (llist->when || llist->must) {
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED) && (llist->when || llist->must)) {
         if (options & LYS_PARSE_OPT_INGRP) {
             if (lyxp_node_check_syntax(retval)) {
                 goto error;
@@ -5366,7 +5379,7 @@ read_yin_list(struct lys_module *module, struct lys_node *parent, struct lyxml_e
     }
 
     /* check XPath dependencies */
-    if (list->when || list->must) {
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED) && (list->when || list->must)) {
         if (options & LYS_PARSE_OPT_INGRP) {
             if (lyxp_node_check_syntax(retval)) {
                 goto error;
@@ -5578,7 +5591,7 @@ read_yin_container(struct lys_module *module, struct lys_node *parent, struct ly
     }
 
     /* check XPath dependencies */
-    if (cont->when || cont->must) {
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED) && (cont->when || cont->must)) {
         if (options & LYS_PARSE_OPT_INGRP) {
             if (lyxp_node_check_syntax(retval)) {
                 goto error;
@@ -5894,7 +5907,7 @@ read_yin_input_output(struct lys_module *module, struct lys_node *parent, struct
     }
 
     /* check XPath dependencies */
-    if (inout->must) {
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED) && inout->must) {
         if (options & LYS_PARSE_OPT_INGRP) {
             if (lyxp_node_check_syntax(retval)) {
                 goto error;
@@ -6075,7 +6088,7 @@ read_yin_notif(struct lys_module *module, struct lys_node *parent, struct lyxml_
     }
 
     /* check XPath dependencies */
-    if (notif->must) {
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED) && notif->must) {
         if (options & LYS_PARSE_OPT_INGRP) {
             if (lyxp_node_check_syntax(retval)) {
                 goto error;
@@ -6390,7 +6403,7 @@ read_yin_uses(struct lys_module *module, struct lys_node *parent, struct lyxml_e
     }
 
     /* check XPath dependencies */
-    if (uses->when) {
+    if (!(module->ctx->models.flags & LY_CTX_TRUSTED) && uses->when) {
         if (options & LYS_PARSE_OPT_INGRP) {
             if (lyxp_node_check_syntax(retval)) {
                 goto error;
