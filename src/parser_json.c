@@ -770,7 +770,7 @@ error:
     return -1;
 }
 
-static struct lys_node *json_find_ext_schema_node(const struct lys_module *module, struct lys_node *parent, char *name)
+static struct lys_node *json_find_ext_schema_node(const struct lys_module *module, const struct lys_node *parent, char *name)
 {
     struct lys_node *schema = NULL;
     struct ly_set *ext_data_nodes = NULL;
