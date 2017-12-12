@@ -251,4 +251,15 @@ const struct lys_module *lyp_get_module(const struct lys_module *module, const c
  */
 const struct lys_module *lyp_get_import_module_ns(const struct lys_module *module, const char *ns);
 
+/**
+ * @brief Get data nodes in extension instance and add to set of nodes
+ * @param[in] ext List of extension instance
+ * @param[in] size Size of list
+ * @param[in] set Set of pointers, which content data nodes
+ * @return Set of pointers, which content data nodes
+ */
+struct ly_set *lys_ext_get_data_nodes(struct lys_ext_instance **ext, uint8_t size, struct ly_set * set);
+
+struct ly_set *lys_ext_search_data_nodes(struct lys_node *root, struct ly_set *set);
+
 #endif /* LY_PARSER_H_ */

@@ -2178,6 +2178,11 @@ lyd_merge_to_ctx(struct lyd_node **trg, const struct lyd_node *src, int options,
 
     parent = lys_parent(target->schema);
 
+    if (parent && parent->nodetype == LYS_EXT &&
+        ((struct lys_ext_instance_complex*)parent)->parent_type == LYEXT_PAR_MODULE) {
+        parent = NULL;
+    }
+
     /* go up all uses */
     while (parent && (parent->nodetype == LYS_USES)) {
         parent = lys_parent(parent);

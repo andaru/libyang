@@ -289,10 +289,22 @@ lys_ext_complex_get_substmt(LY_STMT stmt, struct lys_ext_instance_complex *ext, 
         return NULL;
     }
 
+    /* if stmt is STMT_DATA_*, then stmt must decrement */
+    if (stmt >= LY_STMT_ACTION && stmt < LY_STMT_GROUPING && (stmt % 2 != LY_STMT_ACTION % 2)) {
+        stmt -= 1;
+    }
+
     /* search the substatements defined by the plugin */
     for (i = 0; ext->substmt[i].stmt; i++) {
         if (stmt == LY_STMT_NODE) {
-            if (ext->substmt[i].stmt >= LY_STMT_ACTION && ext->substmt[i].stmt <= LY_STMT_USES) {
+            if (ext->substmt[i].stmt >= LY_STMT_ACTION && ext->substmt[i].stmt <= LY_STMT_GROUPING) {
+                if (info) {
+                    *info = &ext->substmt[i];
+                }
+                break;
+            }
+        } else if (stmt >= LY_STMT_ACTION && stmt < LY_STMT_GROUPING) {
+            if (ext->substmt[i].stmt == stmt || ext->substmt[i].stmt == stmt +1) {
                 if (info) {
                     *info = &ext->substmt[i];
                 }
@@ -311,6 +323,48 @@ lys_ext_complex_get_substmt(LY_STMT stmt, struct lys_ext_instance_complex *ext, 
     } else {
         return NULL;
     }
+}
+
+struct ly_set *lys_ext_get_data_nodes(struct lys_ext_instance **ext, uint8_t size, struct ly_set * set) {
+    int i;
+    struct lys_node **node;
+    LY_STMT stmt;
+    struct lyext_substmt *info;
+
+    if (!set) {
+        set = ly_set_new();
+    }
+
+    for (i = 0; i < size; ++i) {
+        if (ext[i]->flags & LYEXT_OPT_DATA) {
+            for (stmt = LY_STMT_ACTION; stmt < LY_STMT_GROUPING; stmt += 2) {
+                node = lys_ext_complex_get_substmt(stmt, (struct lys_ext_instance_complex *)ext[i], &info);
+                if (node && *node && (info->stmt % 2 == LY_STMT_DATA_ACTION % 2)) {
+                    ly_set_add(set, *node, 0);
+                }
+            }
+        }
+    }
+    return set;
+}
+
+struct ly_set *lys_ext_search_data_nodes(struct lys_node *root, struct ly_set *set) {
+    struct lys_node *node, *next;
+
+    set = lys_ext_get_data_nodes(root->ext, root->ext_size, set);
+
+    /* find extension instance in choice and its descendant */
+    if (root->nodetype == LYS_CHOICE || root->nodetype == LYS_CASE || root->nodetype == LYS_USES) {
+        if (root->nodetype == LYS_USES) {
+            root = (struct lys_node *)((struct lys_node_uses *)root)->grp;
+        }
+        LY_TREE_FOR_SAFE(root->child, next, node) {
+            if (node->nodetype == LYS_CHOICE || node->nodetype == LYS_CASE) {
+                lys_ext_search_data_nodes(node, set);
+            }
+        }
+    }
+    return set;
 }
 
 LY_STMT

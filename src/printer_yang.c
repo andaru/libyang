@@ -2230,6 +2230,21 @@ yang_print_extension_instances(struct lyout *out, int level, const struct lys_mo
                 case LY_STMT_USES:
                     YANG_PRINT_EXTCOMPLEX_SNODE(info[i].stmt);
                     break;
+                case LY_STMT_DATA_ACTION:
+                case LY_STMT_DATA_ANYDATA:
+                case LY_STMT_DATA_ANYXML:
+                case LY_STMT_DATA_CASE:
+                case LY_STMT_DATA_CHOICE:
+                case LY_STMT_DATA_CONTAINER:
+                case LY_STMT_DATA_INPUT:
+                case LY_STMT_DATA_OUTPUT:
+                case LY_STMT_DATA_LEAF:
+                case LY_STMT_DATA_LEAFLIST:
+                case LY_STMT_DATA_LIST:
+                case LY_STMT_DATA_NOTIFICATION:
+                case LY_STMT_DATA_USES:
+                    YANG_PRINT_EXTCOMPLEX_SNODE(info[i].stmt - 1);
+                        break;
                 case LY_STMT_LENGTH:
                     YANG_PRINT_EXTCOMPLEX_STRUCT_M(LY_STMT_LENGTH, struct lys_restr, yang_print_restr,
                                                    "length", ((struct lys_restr *)(*pp))->expr);

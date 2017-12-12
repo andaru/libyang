@@ -202,6 +202,9 @@ lys_getnext(const struct lys_node *last, const struct lys_node *parent, const st
 {
     const struct lys_node *next, *aug_parent;
     struct lys_node **snode;
+    struct lys_ext_instance **ext, *tmp_ext;
+    uint i;
+    uint8_t ext_size;
 
     if ((!parent && !module) || (parent && (parent->nodetype == LYS_USES) && !(options & LYS_GETNEXT_PARENTUSES))) {
         LOGERR(LY_EINVAL, "%s: Invalid parameter.", __func__);
@@ -260,14 +263,71 @@ repeat:
         next = next->next;
     }
 
-    if (!next) {     /* cover case when parent is augment */
+    if (!next) {
+        /* cover case when parent is augment */
         if (!last || last->parent == parent || lys_parent(last) == parent) {
-            /* no next element */
-            return NULL;
+            /* check data statement in extension instance */
+            if (!parent) {
+                ext = module->ext;
+                ext_size = module->ext_size;
+            } else {
+                ext = parent->ext;
+                ext_size = parent->ext_size;
+            }
+
+            snode = NULL;
+            for (i = 0; i < ext_size; ++i) {
+                if (ext[i]->flags & LYEXT_OPT_DATA) {
+                    snode = (struct lys_node **)lys_ext_complex_get_substmt(LY_STMT_NODE, (struct lys_ext_instance_complex *)ext[i], NULL);
+                    if (snode && *snode) {
+                        break;
+                    }
+                }
+            }
+
+            if (i >= ext_size) {
+                return NULL;
+            } else {
+                last = next = *snode;
+            }
+        } else if (last->parent->nodetype == LYS_EXT) {
+            tmp_ext = ((struct lys_ext_instance *)last->parent);
+            if (tmp_ext->parent == module) {
+                ext = module->ext;
+                ext_size = module->ext_size;
+            } else {
+                last = tmp_ext->parent;
+                ext = last->ext;
+                ext_size = last->ext_size;
+            }
+
+            snode = NULL;
+            /* last selected extension instance */
+            for (i = 0; i < ext_size; ++i) {
+                if (ext[i] == tmp_ext) {
+                    break;
+                }
+            }
+            /* select extension instance, which can appear in data tree */
+            for (i = i + 1; i < ext_size; ++i) {
+                if (ext[i]->flags & LYEXT_OPT_DATA) {
+                    snode = (struct lys_node **)lys_ext_complex_get_substmt(LY_STMT_NODE, (struct lys_ext_instance_complex *)ext[i], NULL);
+                    if (snode && *snode) {
+                        break;
+                    }
+                }
+            }
+
+            if (i >= last->ext_size) {
+                return NULL;
+            } else {
+                last = next = *snode;
+            }
+        } else {
+            last = lys_parent(last);
+            next = last->next;
+            goto repeat;
         }
-        last = lys_parent(last);
-        next = last->next;
-        goto repeat;
     } else {
         last = next;
     }
@@ -431,11 +491,25 @@ struct lys_node_grp *
 lys_find_grouping_up(const char *name, struct lys_node *start)
 {
     struct lys_node *par_iter, *iter, *stop;
+    struct lys_ext_instance_complex *ext;
 
     for (par_iter = start; par_iter; par_iter = par_iter->parent) {
         /* top-level augment, look into module (uses augment is handled correctly below) */
         if (par_iter->parent && !par_iter->parent->parent && (par_iter->parent->nodetype == LYS_AUGMENT)) {
             par_iter = lys_main_module(par_iter->parent->module)->data;
+            if (!par_iter) {
+                break;
+            }
+        }
+        /* parent of extension instance */
+        if (par_iter->nodetype == LYS_EXT) {
+            ext = (struct lys_ext_instance_complex *)par_iter;
+            par_iter = NULL;
+            if (ext->parent_type == LYEXT_PAR_MODULE) {
+                par_iter = lys_main_module((struct lys_module *)ext->parent)->data;
+            } else if (ext->parent_type == LYEXT_PAR_NODE) {
+                par_iter = ext->parent;
+            }
             if (!par_iter) {
                 break;
             }
@@ -4810,20 +4884,33 @@ lys_extension_instances_free(struct ly_ctx *ctx, struct lys_ext_instance **e, un
                     }
                     break;
                 case LY_STMT_ACTION:
+                case LY_STMT_DATA_ACTION:
                 case LY_STMT_ANYDATA:
+                case LY_STMT_DATA_ANYDATA:
                 case LY_STMT_ANYXML:
+                case LY_STMT_DATA_ANYXML:
                 case LY_STMT_CASE:
+                case LY_STMT_DATA_CASE:
                 case LY_STMT_CHOICE:
+                case LY_STMT_DATA_CHOICE:
                 case LY_STMT_CONTAINER:
+                case LY_STMT_DATA_CONTAINER:
                 case LY_STMT_GROUPING:
                 case LY_STMT_INPUT:
+                case LY_STMT_DATA_INPUT:
                 case LY_STMT_LEAF:
+                case LY_STMT_DATA_LEAF:
                 case LY_STMT_LEAFLIST:
+                case LY_STMT_DATA_LEAFLIST:
                 case LY_STMT_LIST:
+                case LY_STMT_DATA_LIST:
                 case LY_STMT_NOTIFICATION:
+                case LY_STMT_DATA_NOTIFICATION:
                 case LY_STMT_OUTPUT:
+                case LY_STMT_DATA_OUTPUT:
                 case LY_STMT_RPC:
                 case LY_STMT_USES:
+                case LY_STMT_DATA_USES:
                     pp = (void**)&((struct lys_ext_instance_complex *)e[i])->content[substmt[j].offset];
                     LY_TREE_FOR_SAFE((struct lys_node *)(*pp), snext, siter) {
                         lys_node_free(siter, NULL, 0);

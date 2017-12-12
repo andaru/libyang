@@ -2246,6 +2246,21 @@ yin_print_extension_instances(struct lyout *out, int level, const struct lys_mod
                 case LY_STMT_USES:
                     YIN_PRINT_EXTCOMPLEX_SNODE(info[i].stmt);
                     break;
+                case LY_STMT_DATA_ACTION:
+                case LY_STMT_DATA_ANYDATA:
+                case LY_STMT_DATA_ANYXML:
+                case LY_STMT_DATA_CASE:
+                case LY_STMT_DATA_CHOICE:
+                case LY_STMT_DATA_CONTAINER:
+                case LY_STMT_DATA_INPUT:
+                case LY_STMT_DATA_OUTPUT:
+                case LY_STMT_DATA_LEAF:
+                case LY_STMT_DATA_LEAFLIST:
+                case LY_STMT_DATA_LIST:
+                case LY_STMT_DATA_NOTIFICATION:
+                case LY_STMT_DATA_USES:
+                    YIN_PRINT_EXTCOMPLEX_SNODE(info[i].stmt - 1);
+                    break;
                 case LY_STMT_LENGTH:
                     YIN_PRINT_EXTCOMPLEX_STRUCT_M(LY_STMT_LENGTH, struct lys_restr, yin_print_typerestr, "length");
                     break;

@@ -254,6 +254,9 @@ typedef enum lys_nodetype {
  *
  * The values <= #LY_STMT_UNIQUE are compatible with #LYEXT_SUBSTMT values which defines the subset of YANG statements
  * that does not store extension instances directly.
+ *
+ *  The values from LY_STMT_ACTION to LY_STMT_USES have second value LY_STMT_DATA_*. These values represent that
+ *  data statements can appear in data tree. When it parsing schema, it checks both values.
  */
 typedef enum {
     LY_STMT_NODE = -1,    /**< mask for values #LY_STMT_ACTION - #LY_STMT_USES */
@@ -304,19 +307,32 @@ typedef enum {
     LY_STMT_UNIQUE,       /**< stored as ::lys_unique* */
     LY_STMT_MODULE,       /**< stored as ::lys_module* */
     LY_STMT_ACTION,       /**< stored as ::lys_node_rpc_action*, part of the data tree */
+    LY_STMT_DATA_ACTION,
     LY_STMT_ANYDATA,      /**< stored as ::lys_node_anydata*, part of the data tree  */
+    LY_STMT_DATA_ANYDATA,
     LY_STMT_ANYXML,       /**< stored as ::lys_node_anydata*, part of the data tree  */
+    LY_STMT_DATA_ANYXML,
     LY_STMT_CASE,         /**< stored as ::lys_node_case*, part of the data tree  */
+    LY_STMT_DATA_CASE,
     LY_STMT_CHOICE,       /**< stored as ::lys_node_choice*, part of the data tree  */
+    LY_STMT_DATA_CHOICE,
     LY_STMT_CONTAINER,    /**< stored as ::lys_node_container*, part of the data tree  */
-    LY_STMT_GROUPING,     /**< stored as ::lys_node_grp*, part of the data tree  */
+    LY_STMT_DATA_CONTAINER,
     LY_STMT_INPUT,        /**< stored as ::lys_node_inout*, part of the data tree, but it cannot appear multiple times */
+    LY_STMT_DATA_INPUT,
     LY_STMT_LEAF,         /**< stored as ::lys_node_leaf*, part of the data tree  */
+    LY_STMT_DATA_LEAF,
     LY_STMT_LEAFLIST,     /**< leaf-list, stored as ::lys_node_leaflist*, part of the data tree  */
+    LY_STMT_DATA_LEAFLIST,
     LY_STMT_LIST,         /**< stored as ::lys_node_list*, part of the data tree  */
+    LY_STMT_DATA_LIST,
     LY_STMT_NOTIFICATION, /**< stored as ::lys_node_notif*, part of the data tree  */
+    LY_STMT_DATA_NOTIFICATION,
     LY_STMT_OUTPUT,       /**< stored as ::lys_node_anydata*, part of the data tree, but it cannot apper multiple times */
+    LY_STMT_DATA_OUTPUT,
     LY_STMT_USES,         /**< stored as ::lys_node_uses*, part of the data tree  */
+    LY_STMT_DATA_USES,
+    LY_STMT_GROUPING,     /**< stored as ::lys_node_grp*, part of the data tree  */
     LY_STMT_TYPEDEF,      /**< stored as ::lys_tpdf* */
     LY_STMT_TYPE,         /**< stored as ::lys_type* */
     LY_STMT_IFFEATURE,    /**< if-feature, stored as ::lys_iffeature* */
@@ -386,6 +402,8 @@ typedef enum {
 #define LYEXT_OPT_YANG       0x02    /**< temporarily stored pointer to string, which contain prefix and name of extension */
 #define LYEXT_OPT_CONTENT    0x04    /**< content of lys_ext_instance_complex is copied from source (not dup, just memcpy). */
 /** @endcond */
+#define LYEXT_OPT_DATA       0x08    /**< data of extension instance can appear in data tree */
+#define LYEXT_OPT_VALID      0x10    /**< needed to call calback for validation */
 #define LYEXT_OPT_PLUGIN1    0x0100  /**< reserved flag for plugin-specific use */
 #define LYEXT_OPT_PLUGIN2    0x0200  /**< reserved flag for plugin-specific use */
 #define LYEXT_OPT_PLUGIN3    0x0400  /**< reserved flag for plugin-specific use */
@@ -1109,6 +1127,7 @@ struct lys_iffeature {
                                           names) */
 #define LYS_NOTAPPLIED   0x01        /**< flag for the not applied augments to allow keeping the resolved target */
 #define LYS_YINELEM      0x01        /**< yin-element true for extension's argument */
+#define LYS_VALID_DATA   0x1000      /**< flag marking nodes, in which need call validation function of extension */
 /**
  * @}
  */

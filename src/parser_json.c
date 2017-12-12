@@ -770,6 +770,35 @@ error:
     return -1;
 }
 
+static struct lys_node *json_find_ext_schema_node(const struct lys_module *module, struct lys_node *parent, char *name)
+{
+    struct lys_node *schema = NULL;
+    struct ly_set *ext_data_nodes = NULL;
+    unsigned int i;
+
+    /* search in extension instance */
+    if (!parent) {
+        ext_data_nodes = lys_ext_get_data_nodes(module->ext, module->ext_size, ext_data_nodes);
+    } else {
+        ext_data_nodes = lys_ext_search_data_nodes(parent->child, ext_data_nodes);
+    }
+
+    for (i = 0; i < ext_data_nodes->number; ++i) {
+        /* get the proper schema node */
+        schema = ext_data_nodes->set.s[i];
+        while ((schema = (struct lys_node *)lys_getnext(schema, ext_data_nodes->set.s[i]->parent, module, 0))) {
+            if (!strcmp(schema->name, name)) {
+                break;
+            }
+        }
+        if (schema) {
+            break;
+        }
+    }
+    ly_set_free(ext_data_nodes);
+    return schema;
+}
+
 static unsigned int
 json_parse_data(struct ly_ctx *ctx, const char *data, const struct lys_node *schema_parent, struct lyd_node **parent,
                 struct lyd_node *first_sibling, struct lyd_node *prev, struct attr_cont **attrs, int options,
@@ -877,6 +906,9 @@ json_parse_data(struct ly_ctx *ctx, const char *data, const struct lys_node *sch
                     break;
                 }
             }
+            if (!schema) {
+                schema = json_find_ext_schema_node(module, NULL, name);
+            }
         }
     } else {
         if (prefix) {
@@ -912,6 +944,9 @@ json_parse_data(struct ly_ctx *ctx, const char *data, const struct lys_node *sch
                     break;
                 }
             }
+            if (!schema) {
+                schema = json_find_ext_schema_node(module, schema_parent, name);
+            }
         } else {
             while ((schema = (struct lys_node *)lys_getnext(schema, (*parent)->schema, NULL, 0))) {
                 if (!strcmp(schema->name, name)
@@ -920,7 +955,11 @@ json_parse_data(struct ly_ctx *ctx, const char *data, const struct lys_node *sch
                     break;
                 }
             }
+            if (!schema) {
+                schema = json_find_ext_schema_node(module, (*parent)->schema, name);
+            }
         }
+
     }
 
     module = lys_node_module(schema);

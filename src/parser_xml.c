@@ -112,7 +112,9 @@ xml_parse_data(struct ly_ctx *ctx, struct lyxml_elem *xml, struct lyd_node *pare
     struct lyd_attr *dattr, *dattr_iter;
     struct lyxml_attr *attr;
     struct lyxml_elem *child, *next;
-    int i, j, havechildren, r, editbits = 0, pos, filterflag = 0, found;
+    struct ly_set *ext_data_nodes = NULL;
+    int i, havechildren, r, editbits = 0, pos, filterflag = 0, found;
+    unsigned int j;
     int ret = 0;
     const char *str = NULL;
 
@@ -178,6 +180,18 @@ xml_parse_data(struct ly_ctx *ctx, struct lyxml_elem *xml, struct lyd_node *pare
                         break;
                     }
                 }
+
+                /* if still not found, try search extension instance */
+                if (!schema) {
+                    ext_data_nodes = lys_ext_get_data_nodes(mod->ext, mod->ext_size, ext_data_nodes);
+                    for (j = 0; j < ext_data_nodes->number; ++j) {
+                        schema = xml_data_search_schemanode(xml, ext_data_nodes->set.s[j], options);
+                        if (schema) {
+                            break;
+                        }
+                    }
+                    ly_set_free(ext_data_nodes);
+                }
             }
         }
     } else {
@@ -194,6 +208,18 @@ xml_parse_data(struct ly_ctx *ctx, struct lyxml_elem *xml, struct lyd_node *pare
                     schema = xml_data_search_schemanode(xml, parent->schema->child, options);
                 }
             }
+        }
+
+        /* if still not found, try search extension instance */
+        if (!schema) {
+            ext_data_nodes = lys_ext_search_data_nodes(parent->schema, ext_data_nodes);
+            for (j = 0; j < ext_data_nodes->number; ++j) {
+                schema = xml_data_search_schemanode(xml, ext_data_nodes->set.s[j], options);
+                if (schema) {
+                    break;
+                }
+            }
+            ly_set_free(ext_data_nodes);
         }
     }
 
