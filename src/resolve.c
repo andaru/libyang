@@ -4441,6 +4441,7 @@ resolve_extension(struct unres_ext *info, struct lys_ext_instance **ext, struct 
         (*ext)->insubstmt = info->substmt;
         (*ext)->insubstmt_index = info->substmt_index;
         (*ext)->ext_type = e->plugin ? e->plugin->type : LYEXT_FLAG;
+        (*ext)->flags |= e->plugin ? e->plugin->flags : 0;
 
         if (e->argument) {
             if (!(e->flags & LYS_YINELEM)) {
@@ -4460,6 +4461,11 @@ resolve_extension(struct unres_ext *info, struct lys_ext_instance **ext, struct 
                     }
                 }
             }
+        }
+
+        if ((*ext)->flags & LYEXT_OPT_VALID &&
+            (info->parent_type == LYEXT_PAR_NODE || info->parent_type == LYEXT_PAR_TPDF)) {
+            ((struct lys_node *)info->parent)->flags |= LYS_VALID_DATA;
         }
 
         (*ext)->nodetype = LYS_EXT;
@@ -4569,10 +4575,16 @@ resolve_extension(struct unres_ext *info, struct lys_ext_instance **ext, struct 
         (*ext)->def = e;
         (*ext)->parent = info->parent;
         (*ext)->ext_type = e->plugin ? e->plugin->type : LYEXT_FLAG;
+        (*ext)->flags |= e->plugin ? e->plugin->flags : 0;
 
         if (e->argument && !(*ext)->arg_value) {
             LOGVAL(LYE_MISSARG, LY_VLOG_NONE, NULL, e->argument, ext_name);
             goto error;
+        }
+
+        if ((*ext)->flags & LYEXT_OPT_VALID &&
+            (info->parent_type == LYEXT_PAR_NODE || info->parent_type == LYEXT_PAR_TPDF)) {
+            ((struct lys_node *)info->parent)->flags |= LYS_VALID_DATA;
         }
 
         (*ext)->module = info->mod;
